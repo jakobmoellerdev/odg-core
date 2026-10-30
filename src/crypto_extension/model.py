@@ -12,6 +12,27 @@ import odg.model
 
 own_dir = os.path.dirname(__file__)
 
+# well-known system trust store locations (files or directories) of common Linux distributions and
+# the JDK, certificates found there are trusted by the software rather than used by it
+TRUST_STORE_LOCATION_REGEX = re.compile(
+    r'(^|/)('
+    r'etc/ca-certificates/'
+    r'|etc/pki/ca-trust/'
+    r'|etc/pki/tls/(cert\.pem|certs/)'
+    r'|etc/ssl/(cert\.pem|certs/)'
+    r'|lib/security/cacerts$'
+    r'|usr/local/share/ca-certificates/'
+    r'|usr/share/ca-certificates/'
+    r'|usr/share/pki/ca-trust-source/'
+    r')',
+)
+
+
+def is_trust_store_location(
+    location: str,
+) -> bool:
+    return bool(TRUST_STORE_LOCATION_REGEX.search(location))
+
 
 class SupportedSchemaVersions(enum.Enum):
     V1_6 = cyclonedx.schema.SchemaVersion.V1_6
@@ -200,6 +221,7 @@ def deserialise_algorithm(
 def deserialise_certificate(
     certificate_properties: dict,
     crypto_assets_raw: collections.abc.Sequence[dict],
+    locations: collections.abc.Iterable[str],
 ) -> odg.model.CertificateProperties:
     signature_algorithm_ref = bom_ref_to_data_key(
         bom_ref=certificate_properties.get('signatureAlgorithmRef'),
@@ -210,10 +232,15 @@ def deserialise_certificate(
         crypto_assets_raw=crypto_assets_raw,
     )
 
-    kind = guess_certificate_kind(
-        subject_name=certificate_properties.get('subjectName'),
-        issuer_name=certificate_properties.get('issuerName'),
-    )
+    if locations and all(is_trust_store_location(location) for location in locations):
+        # trust stores may also contain certificates without subject name (which can therefore not
+        # be identified as self-signed), hence the location is decisive here
+        kind = odg.model.CertificateKind.TRUST_ANCHOR
+    else:
+        kind = guess_certificate_kind(
+            subject_name=certificate_properties.get('subjectName'),
+            issuer_name=certificate_properties.get('issuerName'),
+        )
 
     if (not_valid_before_raw := certificate_properties.get('notValidBefore')) and (
         not_valid_after_raw := certificate_properties.get('notValidAfter')
@@ -266,6 +293,7 @@ def deserialise_crypto_asset(
     version = crypto_asset_raw.get('version')
     description = crypto_asset_raw.get('description')
     crypto_properties = crypto_asset_raw.get('cryptoProperties')
+    locations = set(iter_locations(crypto_asset_raw=crypto_asset_raw))
 
     if type is ComponentTypes.LIBRARY:
         asset_type = odg.model.CryptoAssetTypes.LIBRARY
@@ -293,6 +321,7 @@ def deserialise_crypto_asset(
         properties = deserialise_certificate(
             certificate_properties=crypto_properties['certificateProperties'],
             crypto_assets_raw=crypto_assets_raw,
+            locations=locations,
         )
 
     elif asset_type is odg.model.CryptoAssetTypes.LIBRARY:
@@ -318,8 +347,6 @@ def deserialise_crypto_asset(
 
     else:
         raise RuntimeError('this is a bug, we checked supported asset types before')
-
-    locations = set(iter_locations(crypto_asset_raw=crypto_asset_raw))
 
     return odg.model.CryptoAsset(
         names=[name],
